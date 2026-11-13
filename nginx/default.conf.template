@@ -1,0 +1,46 @@
+# docs-viewer's nginx server. The nginx image fills in ${DOCS_*} at start
+# (NGINX_ENVSUBST_FILTER=^DOCS_, so nginx's own $variables are left alone).
+#
+#   /              the viewer page, config.json and vendor/ (from /usr/share/docs-viewer)
+#   /files/        /srv/docs, with JSON directory listings the page walks
+#   /source/       /srv/source (optional), single files only, no listings
+#
+# No access control here: put it behind a proxy that does that, or bind it to localhost.
+
+server {
+    listen ${DOCS_LISTEN};
+    server_name _;
+    server_tokens off;
+
+    root /usr/share/docs-viewer;
+    index index.html;
+    charset utf-8;
+    add_header Cache-Control "no-store" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location ^~ /files/ {
+        alias /srv/docs/;
+        autoindex on;
+        autoindex_format json;
+        include /etc/nginx/docs-viewer-files.conf;
+
+        location ~ /\. {
+            return 404;
+        }
+    }
+
+    location ^~ /source/ {
+        alias /srv/source/;
+        autoindex off;
+        include /etc/nginx/docs-viewer-files.conf;
+
+        # Dotfiles (.env, .git), dependencies and key material are never served.
+        location ~* (/\.|/node_modules/|\.(pem|key|p12|pfx|jks|keystore)$) {
+            return 404;
+        }
+    }
+}

@@ -1,0 +1,611 @@
+<!doctype html>
+<!--
+  docs-viewer: renders a project's docs/ folder in the browser. Served by the image's nginx
+  (nginx/default.conf.template), next to:
+
+    config.json   written at container start from DOCS_* env vars (nginx/40-docs-viewer-config.sh)
+    files/        the mounted docs folder, with directory listings as JSON
+    source/       the optional project-root mount; links to files outside docs/ open from here
+    vendor/       mermaid, marked and DOMPurify, bundled at image build time
+
+  All paths are relative, so the page works at / or behind a proxy prefix such as /docs/.
+
+  It walks the JSON listing of files/ (subdirectories included) and renders .md files as pages
+  (```mermaid blocks drawn inline) and .mmd files as diagrams. Nothing is built ahead of time.
+
+  Routing is in the hash:
+    #/<path inside docs/>[#<heading id>]   e.g. #/docker.md#common-commands
+    #/~/<path inside the project root>     a file outside docs/, when source/ is mounted
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Docs</title>
+    <style>
+      :root {
+        /* Always light: Mermaid's dark theme makes the hand-picked `style ... fill:` colours in the
+           docs hard to read, and the docs are meant to look like they do in GitLab. */
+        color-scheme: light;
+        --bg: #ffffff;
+        --fg: #1f2328;
+        --muted: #59636e;
+        --border: #d1d9e0;
+        --panel: #f6f8fa;
+        --accent: #0969da;
+        --code-bg: #eff1f3;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        display: grid;
+        grid-template-columns: 300px 1fr;
+        min-height: 100vh;
+      }
+      a { color: var(--accent); }
+
+      /* Sidebar tree */
+      nav {
+        border-right: 1px solid var(--border);
+        background: var(--panel);
+        padding: 16px 12px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow-y: auto;
+        font-size: 14px;
+      }
+      nav h1 { font-size: 15px; margin: 0 4px 12px; }
+      nav h1 a { color: inherit; text-decoration: none; }
+      nav ul { list-style: none; margin: 0; padding: 0; }
+      nav ul ul { padding-left: 14px; border-left: 1px solid var(--border); margin-left: 9px; }
+      nav summary {
+        cursor: pointer;
+        padding: 3px 8px;
+        border-radius: 6px;
+        color: var(--muted);
+        font-weight: 600;
+        list-style-position: inside;
+      }
+      nav summary:hover { background: var(--border); }
+      nav a {
+        display: block;
+        padding: 3px 8px;
+        border-radius: 6px;
+        color: var(--fg);
+        text-decoration: none;
+        word-break: break-word;
+      }
+      nav a:hover { background: var(--border); }
+      nav a[aria-current='page'] { background: var(--accent); color: #fff; }
+      nav .kind { opacity: 0.6; font-size: 12px; }
+
+      /* Page */
+      main { padding: 24px 40px 80px; min-width: 0; max-width: 1100px; }
+      /* .mmd pages: the diagram is the whole page, so use the full width and screen height. */
+      main.wide { max-width: none; padding-bottom: 24px; }
+      main.wide .diagram { max-height: calc(100vh - 170px); }
+      .meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font: 12px ui-monospace, monospace;
+        padding-bottom: 12px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .empty, .notice { color: var(--muted); }
+      .error { color: #d1242f; white-space: pre-wrap; text-align: left; font: 12px ui-monospace, monospace; }
+
+      /* Markdown */
+      .markdown h1, .markdown h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+      .markdown h1 { font-size: 1.9em; }
+      .markdown h2 { font-size: 1.45em; margin-top: 1.6em; }
+      .markdown h3 { font-size: 1.2em; margin-top: 1.4em; }
+      .markdown :is(h1, h2, h3, h4, h5, h6) { scroll-margin-top: 16px; line-height: 1.3; }
+      .markdown code {
+        font: 0.875em ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: var(--code-bg);
+        padding: 0.15em 0.35em;
+        border-radius: 4px;
+      }
+      .markdown pre {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px 16px;
+        overflow-x: auto;
+        line-height: 1.45;
+      }
+      .markdown pre code { background: none; padding: 0; font-size: 0.85em; }
+      .markdown blockquote { margin: 0; padding: 0 1em; color: var(--muted); border-left: 4px solid var(--border); }
+      .markdown table { border-collapse: collapse; display: block; overflow-x: auto; margin: 1em 0; }
+      .markdown th, .markdown td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; vertical-align: top; }
+      .markdown th { background: var(--panel); }
+      .markdown img { max-width: 100%; }
+      .markdown hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+      .markdown li + li { margin-top: 0.2em; }
+      .markdown input[type='checkbox'] { margin-right: 0.4em; }
+
+      /* Diagrams */
+      figure.diagram-figure {
+        margin: 1em 0 1.5em;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      figcaption {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 6px 12px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      figcaption .tools { display: flex; align-items: center; gap: 4px; }
+      figcaption button {
+        font: inherit;
+        color: var(--accent);
+        background: none;
+        border: 0;
+        cursor: pointer;
+        padding: 0 6px;
+        border-radius: 4px;
+      }
+      figcaption button:hover { background: var(--border); }
+      figcaption .zoom { font-variant-numeric: tabular-nums; min-width: 4.5em; }
+      figcaption .sep { width: 1px; height: 14px; background: var(--border); margin: 0 4px; }
+      /* Scrollable viewport: zooming widens the SVG, scrolling/dragging pans it. */
+      .diagram {
+        padding: 16px;
+        overflow: auto;
+        max-height: 80vh;
+        text-align: center;
+        cursor: grab;
+        touch-action: pan-x pan-y;
+      }
+      .diagram.dragging { cursor: grabbing; user-select: none; }
+      /* Block, not inline: an inline SVG gets a few px of text-baseline space below it, which
+         tipped fitted diagrams into a needless scrollbar. */
+      .diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+      figure.diagram-figure pre.source {
+        margin: 0;
+        padding: 12px 16px;
+        overflow-x: auto;
+        font: 12px ui-monospace, monospace;
+        border-top: 1px solid var(--border);
+        background: var(--bg);
+      }
+
+      /* Source files (outside docs/) and links that can't be followed here. */
+      pre.code {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px 16px;
+        overflow-x: auto;
+        font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        tab-size: 2;
+      }
+      .unlinked { border-bottom: 1px dotted var(--muted); cursor: help; }
+
+      @media (max-width: 760px) {
+        body { grid-template-columns: 1fr; }
+        nav { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+        main { padding: 16px; }
+      }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <h1><a href="#/">Docs</a></h1>
+      <div id="tree"><p class="empty">Loading…</p></div>
+    </nav>
+    <main id="content"></main>
+
+
+    <script src="vendor/mermaid.min.js"></script>
+    <script src="vendor/marked.min.js"></script>
+    <script src="vendor/purify.min.js"></script>
+    <script>
+      const FILES = 'files/'; // the mounted docs folder, relative to this page
+      const SOURCE = 'source/'; // the optional project-root mount
+      const SOURCE_PREFIX = '~/'; // hash routes into source/ start with this
+      const isDoc = (p) => /\.(md|mmd)$/i.test(p);
+
+      // Replaced by config.json in main(); these defaults apply if it can't be loaded.
+      // docsPath: where docs/ sits inside the project root, for resolving ../ links.
+      let config = { title: 'Docs', docsPath: 'docs', source: false };
+
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' });
+
+      function el(tag, { dataset, ...props } = {}, ...children) {
+        const node = Object.assign(document.createElement(tag), props);
+        Object.assign(node.dataset, dataset);
+        node.append(...children);
+        return node;
+      }
+
+      // Recursively walk the JSON directory listing, returning file paths relative to docs/.
+      async function listFiles(dir = '') {
+        const res = await fetch(FILES + dir);
+        if (!res.ok) throw new Error(`Listing ${FILES}${dir} failed: ${res.status}`);
+        const entries = await res.json();
+        const nested = await Promise.all(
+          entries
+            .filter((e) => !e.name.startsWith('.'))
+            .map((e) => (e.type === 'directory' ? listFiles(`${dir}${e.name}/`) : [`${dir}${e.name}`])),
+        );
+        return nested.flat();
+      }
+
+      // ---------- Locations ----------
+      // A page is either a doc ({ source: false, path inside docs/ }) or a project file
+      // ({ source: true, path inside the project root }).
+
+      const docsPrefix = () => `${config.docsPath.replace(/^\/+|\/+$/g, '')}/`;
+      const fullPath = (loc) => (loc.source ? loc.path : docsPrefix() + loc.path);
+      const fileUrl = (loc) => (loc.source ? SOURCE : FILES) + encodeURI(loc.path);
+      const hashFor = (loc, anchor = '') =>
+        `#/${loc.source ? SOURCE_PREFIX : ''}${encodeURI(loc.path)}${anchor ? `#${anchor}` : ''}`;
+
+      // Resolve a link/image target written relative to the current page. Targets inside docs/
+      // stay docs (even when reached through ../docs/ from a project file); the rest are project files.
+      function resolveTarget(href, current) {
+        const url = new URL(href, `http://project/${fullPath(current)}`);
+        const path = decodeURIComponent(url.pathname).slice(1);
+        const hash = url.hash.slice(1);
+        if (path.startsWith(docsPrefix())) return { source: false, path: path.slice(docsPrefix().length), hash };
+        return { source: true, path, hash };
+      }
+
+      // ---------- Sidebar tree ----------
+
+      function buildTree(paths) {
+        const root = { dirs: {}, files: [] };
+        for (const path of paths) {
+          const parts = path.split('/');
+          let node = root;
+          for (const dir of parts.slice(0, -1)) node = node.dirs[dir] ??= { dirs: {}, files: [] };
+          node.files.push(path);
+        }
+        return root;
+      }
+
+      function renderTree(node) {
+        const ul = el('ul');
+        for (const [name, child] of Object.entries(node.dirs).sort(([a], [b]) => a.localeCompare(b))) {
+          ul.append(el('li', {}, el('details', { open: true }, el('summary', { textContent: name }), renderTree(child))));
+        }
+        for (const path of node.files.sort()) {
+          const name = path.split('/').pop();
+          const label = name.replace(/\.md$/i, '');
+          const link = el('a', { href: hashFor({ source: false, path }), dataset: { path } }, label);
+          if (/\.mmd$/i.test(name)) link.append(' ', el('span', { className: 'kind', textContent: '◇' }));
+          ul.append(el('li', {}, link));
+        }
+        return ul;
+      }
+
+      // ---------- Diagrams ----------
+
+      // Zoom by resizing the SVG inside its scrollable .diagram box (the SVG has a viewBox, so it
+      // scales crisply); panning is just the box's own scroll position.
+      function attachZoom(box, controls) {
+        const svg = box.querySelector('svg');
+        const base = svg?.getBoundingClientRect().width;
+        if (!base) return;
+        svg.style.maxWidth = 'none';
+        svg.style.width = `${base}px`;
+        let scale = 1;
+
+        const label = el('button', { type: 'button', className: 'zoom', title: 'Reset zoom (or double-click the diagram)', textContent: '100%' });
+        const setScale = (next, cx = box.clientWidth / 2, cy = box.clientHeight / 2) => {
+          next = Math.min(8, Math.max(0.25, next));
+          const ratio = next / scale;
+          const x = box.scrollLeft + cx;
+          const y = box.scrollTop + cy;
+          scale = next;
+          svg.style.width = `${base * scale}px`;
+          box.scrollLeft = x * ratio - cx; // keep the point under the cursor in place
+          box.scrollTop = y * ratio - cy;
+          label.textContent = `${Math.round(scale * 100)}%`;
+        };
+
+        controls.append(
+          el('button', { type: 'button', title: 'Zoom out', textContent: '−', onclick: () => setScale(scale / 1.25) }),
+          label,
+          el('button', { type: 'button', title: 'Zoom in', textContent: '+', onclick: () => setScale(scale * 1.25) }),
+          el('span', { className: 'sep' }),
+        );
+        label.onclick = () => setScale(1);
+        box.ondblclick = () => setScale(1);
+
+        // Trackpad pinch arrives as wheel + ctrlKey; Ctrl/⌘ + scroll does the same with a mouse.
+        // A plain wheel still scrolls the page.
+        box.addEventListener(
+          'wheel',
+          (e) => {
+            if (!e.ctrlKey && !e.metaKey) return;
+            e.preventDefault();
+            const r = box.getBoundingClientRect();
+            // Clamp: a mouse-wheel notch is ~100 deltaY (would be a 2.7× jump), pinch steps are small.
+            const step = Math.max(-25, Math.min(25, e.deltaY));
+            setScale(scale * Math.exp(-step * 0.01), e.clientX - r.left, e.clientY - r.top);
+          },
+          { passive: false },
+        );
+
+        // Drag to pan.
+        box.onpointerdown = (e) => {
+          if (e.button !== 0) return;
+          const start = { x: e.clientX, y: e.clientY, left: box.scrollLeft, top: box.scrollTop };
+          box.setPointerCapture(e.pointerId);
+          box.classList.add('dragging');
+          box.onpointermove = (m) => {
+            box.scrollLeft = start.left - (m.clientX - start.x);
+            box.scrollTop = start.top - (m.clientY - start.y);
+          };
+          box.onpointerup = box.onpointercancel = () => {
+            box.classList.remove('dragging');
+            box.onpointermove = null;
+          };
+        };
+      }
+
+      // fit: scale the diagram up or down to fill the box's full width (full-page .mmd diagrams); a
+      // tall one then scrolls inside the box. Otherwise it renders at its natural size, capped at
+      // the box width.
+      function fitToBox(box) {
+        const svg = box.querySelector('svg');
+        if (!svg) return;
+        const style = getComputedStyle(box);
+        const availW = box.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        svg.style.maxWidth = 'none';
+        svg.style.width = `${Math.floor(availW)}px`;
+      }
+
+      // Returns a <figure> placeholder plus a render() that draws the diagram into it once it's in the DOM.
+      let diagramSeq = 0;
+      function diagramFigure(code, { fit = false } = {}) {
+        const target = el('div', { className: 'diagram' });
+        const source = el('pre', { className: 'source', textContent: code, hidden: true });
+        const toggle = el('button', { type: 'button', textContent: 'Show source' });
+        toggle.onclick = () => {
+          source.hidden = !source.hidden;
+          toggle.textContent = source.hidden ? 'Show source' : 'Hide source';
+        };
+        const zoomControls = el('span', { className: 'tools' });
+        const figure = el(
+          'figure',
+          { className: 'diagram-figure' },
+          el('figcaption', {}, el('span', { textContent: 'Mermaid diagram' }), el('span', { className: 'tools' }, zoomControls, toggle)),
+          target,
+          source,
+        );
+        const render = async () => {
+          try {
+            // Mermaid's own comment stripping skips a bare `%%` line (no text after it), which then
+            // breaks the parse when it comes before the diagram type — drop those first.
+            const { svg } = await mermaid.render(`mermaid-${++diagramSeq}`, code.replace(/^[ \t]*%%[ \t]*$/gm, ''));
+            target.innerHTML = svg;
+            if (fit) fitToBox(target);
+            attachZoom(target, zoomControls);
+          } catch (err) {
+            target.replaceChildren(el('div', { className: 'error', textContent: String(err?.message ?? err) }));
+            source.hidden = false;
+          }
+        };
+        return { figure, render };
+      }
+
+      // ---------- Markdown ----------
+
+      // GitHub/GitLab-style heading ids, so existing `file.md#some-heading` links keep working.
+      function slugify(text) {
+        return text
+          .trim()
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}\s_-]/gu, '')
+          .replace(/\s/g, '-');
+      }
+
+      // A link to a project file while source/ isn't mounted: keep the text, drop the link.
+      function unlink(a, path) {
+        a.replaceWith(el('span', { className: 'unlinked', title: `${path} (not available in this viewer)` }, ...a.childNodes));
+      }
+
+      function rewriteLinks(container, current) {
+        for (const a of container.querySelectorAll('a[href]')) {
+          const href = a.getAttribute('href');
+          if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+            if (/^https?:/i.test(href)) Object.assign(a, { target: '_blank', rel: 'noopener' });
+            continue;
+          }
+          if (href.startsWith('#')) {
+            a.href = hashFor(current, href.slice(1));
+            continue;
+          }
+          const t = resolveTarget(href, current);
+          if (t.source && !config.source) unlink(a, t.path);
+          // Docs open as pages, project files as code pages; other files in docs/ open raw.
+          else if (t.source || isDoc(t.path)) a.href = hashFor(t, t.hash);
+          else a.href = fileUrl(t);
+        }
+        for (const img of container.querySelectorAll('img[src]')) {
+          const src = img.getAttribute('src');
+          if (/^[a-z][a-z0-9+.-]*:/i.test(src)) continue;
+          const t = resolveTarget(src, current);
+          if (t.source && !config.source) img.replaceWith(el('span', { className: 'unlinked', title: t.path, textContent: img.alt || t.path }));
+          else img.src = fileUrl(t);
+        }
+      }
+
+      function addHeadingIds(container) {
+        const seen = new Map();
+        for (const h of container.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+          const base = slugify(h.textContent);
+          const n = seen.get(base) ?? 0;
+          seen.set(base, n + 1);
+          h.id = n ? `${base}-${n}` : base;
+        }
+      }
+
+      // ---------- Pages ----------
+
+      let files = [];
+      let current = null; // the hash path of the page on screen
+      let renderSeq = 0;
+
+      function parseHash() {
+        const raw = location.hash.replace(/^#\/?/, '');
+        const i = raw.indexOf('#');
+        let path = decodeURI(i === -1 ? raw : raw.slice(0, i));
+        const anchor = i === -1 ? '' : decodeURIComponent(raw.slice(i + 1));
+        const source = path.startsWith(SOURCE_PREFIX);
+        if (source) path = path.slice(SOURCE_PREFIX.length);
+        return { path, source, anchor };
+      }
+
+      function defaultPath() {
+        return files.find((p) => /^(readme|index)\.md$/i.test(p)) ?? null;
+      }
+
+      function scrollToAnchor(anchor) {
+        if (!anchor) return window.scrollTo(0, 0);
+        document.getElementById(anchor)?.scrollIntoView();
+      }
+
+      function markActive(loc) {
+        for (const a of document.querySelectorAll('nav a[data-path]')) {
+          if (loc && !loc.source && a.dataset.path === loc.path) {
+            a.setAttribute('aria-current', 'page');
+            for (let d = a.closest('details'); d; d = d.parentElement.closest('details')) d.open = true;
+          } else a.removeAttribute('aria-current');
+        }
+      }
+
+      function landing() {
+        current = null;
+        markActive(null);
+        document.title = config.title;
+        const content = document.getElementById('content');
+        content.classList.remove('wide');
+        content.replaceChildren(
+          el('div', { className: 'markdown' },
+            el('h1', { textContent: config.title }),
+            el('p', { className: 'notice', textContent: `Everything in ${docsPrefix()} (${files.length} files).` }),
+          ),
+          renderTree(buildTree(files)),
+        );
+      }
+
+      // A project file outside docs/: text as a code page, images inline, anything else as a link.
+      function sourcePage(loc, res, text) {
+        const type = res.headers.get('Content-Type') ?? '';
+        if (/^image\//.test(type)) return el('p', {}, el('img', { src: fileUrl(loc), alt: loc.path, style: 'max-width:100%' }));
+        if (text === null) return el('p', {}, el('a', { href: fileUrl(loc), textContent: `Open ${loc.path}` }));
+        return el('pre', { className: 'code', textContent: text });
+      }
+
+      async function show() {
+        const { path: requested, source, anchor } = parseHash();
+        const loc = { source, path: requested || (source ? '' : defaultPath()) };
+        if (!loc.path) return landing();
+        const key = hashFor(loc);
+        if (key === current) return scrollToAnchor(anchor); // same page, just a heading link
+
+        const seq = ++renderSeq;
+        current = key;
+        markActive(loc);
+        const name = loc.path.split('/').pop();
+        document.title = `${name} · ${config.title}`;
+        const content = document.getElementById('content');
+        const meta = el(
+          'div',
+          { className: 'meta' },
+          el('span', { textContent: fullPath(loc) }),
+          el('a', { href: fileUrl(loc), target: '_blank', rel: 'noopener', textContent: 'Raw' }),
+        );
+
+        if (loc.source && !config.source) {
+          content.replaceChildren(meta, el('p', { className: 'error', textContent: `${loc.path} is outside ${docsPrefix()} and the project source isn't mounted here.` }));
+          return;
+        }
+        const res = await fetch(fileUrl(loc));
+        if (seq !== renderSeq) return;
+        if (!res.ok) {
+          content.replaceChildren(meta, el('p', { className: 'error', textContent: `Couldn't load ${fullPath(loc)} (${res.status}).` }));
+          return;
+        }
+        const isText = /^(text\/|application\/json)/.test(res.headers.get('Content-Type') ?? 'text/plain');
+        const text = isText ? await res.text() : null;
+        if (seq !== renderSeq) return;
+
+        if (/\.mmd$/i.test(loc.path) && text !== null) {
+          const { figure, render } = diagramFigure(text.trim(), { fit: true });
+          content.classList.add('wide');
+          content.replaceChildren(meta, el('h1', { textContent: name }), figure);
+          await render();
+          return;
+        }
+
+        content.classList.remove('wide');
+        if (!/\.md$/i.test(loc.path) || text === null) {
+          content.replaceChildren(meta, el('div', { className: 'markdown' }, el('h1', { textContent: name })), sourcePage(loc, res, text));
+          scrollToAnchor('');
+          return;
+        }
+
+        const body = el('article', { className: 'markdown' });
+        body.innerHTML = DOMPurify.sanitize(marked.parse(text, { gfm: true }));
+        addHeadingIds(body);
+        rewriteLinks(body, loc);
+
+        // ```mermaid blocks come out of marked as <pre><code class="language-mermaid">.
+        const diagrams = [...body.querySelectorAll('pre > code.language-mermaid')].map((code) => {
+          const d = diagramFigure(code.textContent.trim());
+          code.parentElement.replaceWith(d.figure);
+          return d;
+        });
+
+        content.replaceChildren(meta, body);
+        for (const d of diagrams) {
+          if (seq !== renderSeq) return; // navigated away mid-render
+          await d.render();
+        }
+        scrollToAnchor(anchor); // after diagrams, so their height is known
+      }
+
+      async function main() {
+        try {
+          const res = await fetch('config.json', { cache: 'no-store' });
+          if (res.ok) config = { ...config, ...(await res.json()) };
+        } catch {} // keep the defaults
+        document.title = config.title;
+        document.querySelector('nav h1 a').textContent = config.title;
+
+        const treeBox = document.getElementById('tree');
+        try {
+          files = (await listFiles()).filter(isDoc).sort();
+        } catch (err) {
+          treeBox.replaceChildren(el('p', { className: 'error', textContent: String(err.message ?? err) }));
+          return;
+        }
+        treeBox.replaceChildren(files.length ? renderTree(buildTree(files)) : el('p', { className: 'empty', textContent: 'No docs found.' }));
+        addEventListener('hashchange', show);
+        show();
+      }
+
+      main();
+    </script>
+  </body>
+</html>

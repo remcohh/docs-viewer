@@ -1,0 +1,10 @@
+{
+  "name": "docs-viewer-vendor",
+  "private": true,
+  "description": "Browser libraries bundled into the image (copied from node_modules by the Dockerfile).",
+  "dependencies": {
+    "dompurify": "3.2.4",
+    "marked": "15.0.7",
+    "mermaid": "11.4.1"
+  }
+}

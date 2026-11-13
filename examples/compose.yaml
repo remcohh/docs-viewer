@@ -1,0 +1,15 @@
+# Add to the project's compose file. Run with: docker compose up docs
+services:
+  docs:
+    image: ghcr.io/remcohh/docs-viewer:1
+    ports:
+      # Loopback only: the image has no access control of its own.
+      - '127.0.0.1:3003:80'
+    environment:
+      DOCS_TITLE: My project
+    volumes:
+      - ./docs:/srv/docs:ro
+      # Optional: lets links to files outside docs/ (../Dockerfile, ../src/...) open in the viewer.
+      # Dotfiles (.env, .git), node_modules and key files are never served. Only mount this where
+      # the viewer is private to the people who may read the code.
+      - .:/srv/source:ro

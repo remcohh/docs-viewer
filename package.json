@@ -1,0 +1,16 @@
+{
+  "name": "docs-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "docs-check: lists AI-generated docs whose sources changed. The viewer itself ships as a Docker image.",
+  "type": "module",
+  "bin": {
+    "docs-check": "bin/docs-check.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=20.1"
+  }
+}
