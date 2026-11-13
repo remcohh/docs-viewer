@@ -35,5 +35,9 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
+          # No attestation manifests: GitLab's registry rejects them when the image is mirrored
+          # (`docker buildx imagetools create` → "400 Bad Request: blob unknown to registry").
+          provenance: false
+          sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
