@@ -54,17 +54,10 @@ asking. All the page's URLs are relative, so it works under a prefix: see
 
 ## Generated docs
 
-Two pieces for docs written by an AI agent from the code:
-
-- **[skills/generated-docs](skills/generated-docs/SKILL.md)**: an agent skill describing a header
-  each generated doc carries (the prompt, its sources and the commit it was generated at), and
-  how to regenerate. Copy it into the project's `.claude/skills/`.
-- **`docs-check`**: lists those docs whose sources changed since they were generated, and exits 1
-  if any did. Node 20.1+, no dependencies; run it from the project root, inside its git repository:
-
-  ```sh
-  npx -y -p github:remcohh/docs-viewer#v1.0.0 docs-check docs
-  ```
+[skills/generated-docs](skills/generated-docs/SKILL.md) is an agent skill for docs an AI agent
+writes from the code. Each doc carries the developer's prompt in a leading comment, which the
+viewer hides; regenerating answers that prompt again from the current code. Copy it into the
+project's `.claude/skills/`.
 
 ## Releasing
 
