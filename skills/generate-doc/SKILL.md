@@ -1,11 +1,14 @@
 ---
-name: generated-docs
-description: Write or regenerate docs and diagrams in a project's docs/ folder from a developer's prompt. Use when drawing a diagram or writing an explanatory doc from the code, or when asked to regenerate or refresh one.
+name: generate-doc
+description: Write or regenerate one doc or diagram in a project's docs/ folder from a developer's prompt. Use when drawing a diagram or writing an explanatory doc from the code, or when asked to regenerate or refresh one.
 ---
 
 A generated doc is the answer to a **prompt** the developer owns. The prompt is the spec; the body
 is what the code makes true of it today. Regenerating means answering the prompt again from the
 codebase as it is now.
+
+Each run works on one doc: the one the developer names, or a new one they describe. When the
+request leaves it open which doc, ask.
 
 ## The prompt
 

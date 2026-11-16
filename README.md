@@ -54,8 +54,8 @@ asking. All the page's URLs are relative, so it works under a prefix: see
 
 ## Generated docs
 
-[skills/generated-docs](skills/generated-docs/SKILL.md) is an agent skill for docs an AI agent
-writes from the code. Each doc carries the developer's prompt in a leading comment, which the
+[skills/generate-doc](skills/generate-doc/SKILL.md) is an agent skill that writes or regenerates
+one doc from the code. Each doc carries the developer's prompt in a leading comment, which the
 viewer hides; regenerating answers that prompt again from the current code. Copy it into the
 project's `.claude/skills/`.
 
